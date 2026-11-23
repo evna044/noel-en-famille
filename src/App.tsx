@@ -37,6 +37,7 @@ const target = new Date('2026-12-24T20:00:00+01:00')
 
 function getCountdown() {
   const distance = Math.max(0, target.getTime() - Date.now())
+
   return {
     days: Math.floor(distance / 86400000),
     hours: Math.floor((distance % 86400000) / 3600000),
@@ -59,28 +60,35 @@ const avatarEmoji: Record<string, string> = {
 export default function App() {
   const [countdown, setCountdown] = useState(getCountdown())
   const [session, setSession] = useState<Session | null>(null)
+
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+
   const [profile, setProfile] = useState<Profile | null>(null)
   const [wishlist, setWishlist] = useState<Wishlist | null>(null)
   const [gifts, setGifts] = useState<GiftItem[]>([])
-  const [photoUrls, setPhotoUrls] = useState<Record<string, string[]>>({})
-  const [selectedPhotos, setSelectedPhotos] = useState<File[]>([])
   const [loadingList, setLoadingList] = useState(false)
+
   const [editingGift, setEditingGift] = useState<GiftItem | null>(null)
   const [formOpen, setFormOpen] = useState(false)
+
   const [giftTitle, setGiftTitle] = useState('')
   const [giftPrice, setGiftPrice] = useState('')
   const [giftLink, setGiftLink] = useState('')
   const [giftDescription, setGiftDescription] = useState('')
+
+  // Photos
+  const [selectedPhotos, setSelectedPhotos] = useState<File[]>([])
+  const [photoUrls, setPhotoUrls] = useState<Record<string, string[]>>({})
 
   useEffect(() => {
     const timer = window.setInterval(
       () => setCountdown(getCountdown()),
       1000
     )
+
     return () => window.clearInterval(timer)
   }, [])
 
@@ -110,6 +118,7 @@ export default function App() {
       setProfile(null)
       setWishlist(null)
       setGifts([])
+      setPhotoUrls({})
     }
   }, [session?.user.id])
 
@@ -120,10 +129,12 @@ export default function App() {
     ['Secondes', countdown.seconds],
   ] as const, [countdown])
 
+  // Chargement du profil, de la liste et des photos
   async function loadFamilyList(userId: string) {
     if (!supabase) return
 
     const client = supabase
+
     setLoadingList(true)
     setMessage('')
 
@@ -177,12 +188,51 @@ export default function App() {
 
       if (giftsError) throw giftsError
 
-      setGifts((giftData || []) as GiftItem[])
+      const loadedGifts = (giftData || []) as GiftItem[]
+      setGifts(loadedGifts)
+
+      // Récupération des photos associées aux cadeaux
+      if (loadedGifts.length === 0) {
+        setPhotoUrls({})
+      } else {
+        const { data: photoData, error: photoError } = await client
+          .from('gift_photos')
+          .select('gift_id, storage_path, sort_order')
+          .in('gift_id', loadedGifts.map(gift => gift.id))
+          .order('sort_order', { ascending: true })
+
+        if (photoError) throw photoError
+
+        const urls: Record<string, string[]> = {}
+
+        for (const photo of photoData || []) {
+          const { data: signedPhoto, error: signedError } = await client
+            .storage
+            .from('gift-photos')
+            .createSignedUrl(photo.storage_path, 3600)
+
+          if (signedError) {
+            console.error('Erreur de lecture de photo :', signedError)
+            continue
+          }
+
+          if (signedPhoto?.signedUrl) {
+            if (!urls[photo.gift_id]) {
+              urls[photo.gift_id] = []
+            }
+
+            urls[photo.gift_id].push(signedPhoto.signedUrl)
+          }
+        }
+
+        setPhotoUrls(urls)
+      }
 
     } catch (error) {
       console.error('Erreur de chargement :', error)
+
       setMessage(
-        "Impossible de charger ta liste. Vérifie les autorisations Supabase (RLS) et réessaie."
+        "Impossible de charger ta liste. Vérifie les autorisations Supabase et réessaie."
       )
     } finally {
       setLoadingList(false)
@@ -191,6 +241,7 @@ export default function App() {
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+
     if (!supabase) return
 
     setBusy(true)
@@ -239,6 +290,7 @@ export default function App() {
     setGiftPrice('')
     setGiftLink('')
     setGiftDescription('')
+    setSelectedPhotos([])
     setFormOpen(true)
   }
 
@@ -248,9 +300,11 @@ export default function App() {
     setGiftPrice(item.price == null ? '' : String(item.price))
     setGiftLink(item.link || '')
     setGiftDescription(item.description || '')
+    setSelectedPhotos([])
     setFormOpen(true)
   }
 
+  // Enregistrement du cadeau et de ses photos
   async function saveGift(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
@@ -259,37 +313,109 @@ export default function App() {
     setBusy(true)
     setMessage('')
 
-    const values = {
-      wishlist_id: wishlist.id,
-      title: giftTitle.trim(),
-      price: giftPrice.trim() ? Number(giftPrice) : null,
-      link: giftLink.trim() || null,
-      description: giftDescription.trim() || null,
-    }
+    try {
+      const values = {
+        wishlist_id: wishlist.id,
+        title: giftTitle.trim(),
+        price: giftPrice.trim() ? Number(giftPrice) : null,
+        link: giftLink.trim() || null,
+        description: giftDescription.trim() || null,
+      }
 
-    const result = editingGift
-      ? await supabase
+      let giftId: string
+
+      if (editingGift) {
+        const { data, error } = await supabase
           .from('gifts')
           .update(values)
           .eq('id', editingGift.id)
-      : await supabase
+          .select('id')
+          .single()
+
+        if (error) throw error
+
+        giftId = data.id
+      } else {
+        const { data, error } = await supabase
           .from('gifts')
           .insert(values)
+          .select('id')
+          .single()
 
-    setBusy(false)
+        if (error) throw error
 
-    if (result.error) {
-      console.error(result.error)
+        giftId = data.id
+      }
+
+      // Récupérer le prochain numéro d'ordre pour les photos
+      const { data: existingPhotos, error: existingPhotosError } =
+        await supabase
+          .from('gift_photos')
+          .select('sort_order')
+          .eq('gift_id', giftId)
+          .order('sort_order', { ascending: false })
+          .limit(1)
+
+      if (existingPhotosError) throw existingPhotosError
+
+      let nextOrder = existingPhotos?.[0]?.sort_order != null
+        ? existingPhotos[0].sort_order + 1
+        : 0
+
+      // Envoyer chaque photo dans le stockage privé
+      for (const file of selectedPhotos) {
+        if (!file.type.startsWith('image/')) {
+          throw new Error('Un fichier sélectionné n’est pas une image.')
+        }
+
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+        const storagePath =
+          `${giftId}/${crypto.randomUUID()}-${safeName}`
+
+        const { error: uploadError } = await supabase
+          .storage
+          .from('gift-photos')
+          .upload(storagePath, file, {
+            contentType: file.type,
+            upsert: false,
+          })
+
+        if (uploadError) throw uploadError
+
+        const { error: recordError } = await supabase
+          .from('gift_photos')
+          .insert({
+            gift_id: giftId,
+            storage_path: storagePath,
+            sort_order: nextOrder,
+          })
+
+        if (recordError) {
+          await supabase.storage
+            .from('gift-photos')
+            .remove([storagePath])
+
+          throw recordError
+        }
+
+        nextOrder++
+      }
+
+      setFormOpen(false)
+      setSelectedPhotos([])
+
+      if (session?.user.id) {
+        await loadFamilyList(session.user.id)
+      }
+
+    } catch (error) {
+      console.error('Erreur lors de l’enregistrement :', error)
+
       setMessage(
-        "Impossible d'enregistrer ce cadeau. Vérifie les autorisations Supabase."
+        "Le cadeau ou certaines photos n'ont pas pu être enregistrés. Vérifie les autorisations Supabase."
       )
-      return
-    }
-
-    setFormOpen(false)
-
-    if (session?.user.id) {
-      await loadFamilyList(session.user.id)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -307,15 +433,23 @@ export default function App() {
 
     if (error) {
       console.error(error)
+
       setMessage(
         'Impossible de supprimer ce cadeau. Vérifie les autorisations Supabase.'
       )
+
       return
     }
 
     setGifts(current =>
       current.filter(gift => gift.id !== item.id)
     )
+
+    setPhotoUrls(current => {
+      const updated = { ...current }
+      delete updated[item.id]
+      return updated
+    })
   }
 
   const displayName =
@@ -338,6 +472,7 @@ export default function App() {
           <TreePine size={22} />
           <span>Noël en famille</span>
         </div>
+
         <span className="year">ÉDITION {YEAR}</span>
       </header>
 
@@ -395,12 +530,14 @@ export default function App() {
           </div>
 
           <h2>Notre espace familial</h2>
+
           <p className="card-copy">
             Connecte-toi pour découvrir les listes de cadeaux.
           </p>
 
           <form onSubmit={signIn}>
             <label htmlFor="email">Adresse e-mail</label>
+
             <input
               id="email"
               type="email"
@@ -412,6 +549,7 @@ export default function App() {
             />
 
             <label htmlFor="password">Mot de passe</label>
+
             <input
               id="password"
               type="password"
@@ -454,7 +592,9 @@ export default function App() {
               <span className="welcome-kicker">
                 TON ESPACE PERSONNEL
               </span>
+
               <h2>Bonjour {displayName} !</h2>
+
               <p>
                 {profile?.role === 'admin'
                   ? 'Administrateur'
@@ -488,10 +628,13 @@ export default function App() {
               <div className="empty-icon">
                 <Gift size={25}/>
               </div>
+
               <h3>Ta liste est encore vide</h3>
+
               <p>
                 Ajoute ton premier souhait pour commencer ta liste de Noël.
               </p>
+
               <button className="primary" onClick={openNewGift}>
                 <Plus size={17}/> Ajouter mon premier cadeau
               </button>
@@ -523,6 +666,19 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+
+                  {photoUrls[item.id]?.length > 0 && (
+                    <div className="gift-photos">
+                      {photoUrls[item.id].map((url, index) => (
+                        <img
+                          key={`${item.id}-${index}`}
+                          src={url}
+                          alt={`Photo du cadeau ${item.title}`}
+                          loading="lazy"
+                        />
+                      ))}
+                    </div>
+                  )}
 
                   <h3>{item.title}</h3>
 
@@ -583,6 +739,7 @@ export default function App() {
             <div className="modal-heading">
               <div>
                 <span className="welcome-kicker">TA LISTE DE NOËL</span>
+
                 <h2 id="gift-modal-title">
                   {editingGift ? 'Modifier le cadeau' : 'Ajouter un cadeau'}
                 </h2>
@@ -599,6 +756,7 @@ export default function App() {
 
             <form onSubmit={saveGift}>
               <label htmlFor="gift-title">Nom du cadeau *</label>
+
               <input
                 id="gift-title"
                 value={giftTitle}
@@ -609,6 +767,7 @@ export default function App() {
               />
 
               <label htmlFor="gift-price">Prix (€)</label>
+
               <input
                 id="gift-price"
                 type="number"
@@ -620,6 +779,7 @@ export default function App() {
               />
 
               <label htmlFor="gift-link">Lien du cadeau</label>
+
               <input
                 id="gift-link"
                 type="url"
@@ -629,6 +789,7 @@ export default function App() {
               />
 
               <label htmlFor="gift-description">Description</label>
+
               <textarea
                 id="gift-description"
                 rows={3}
@@ -636,6 +797,37 @@ export default function App() {
                 onChange={e => setGiftDescription(e.target.value)}
                 placeholder="Quelques précisions…"
               />
+
+              <label htmlFor="gift-photos-input">
+                Photos du cadeau
+              </label>
+
+              <input
+                id="gift-photos-input"
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={event => {
+                  setSelectedPhotos(
+                    Array.from(event.target.files || [])
+                  )
+                }}
+              />
+
+              {selectedPhotos.length > 0 && (
+                <p className="selected-photos">
+                  {selectedPhotos.length} photo(s) sélectionnée(s) :
+                  {' '}
+                  {selectedPhotos.map(file => file.name).join(', ')}
+                </p>
+              )}
+
+              {editingGift && (
+                <p className="selected-photos">
+                  Les photos déjà enregistrées seront conservées.
+                  Les nouvelles photos seront ajoutées.
+                </p>
+              )}
 
               <div className="modal-buttons">
                 <button
