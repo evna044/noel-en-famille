@@ -66,6 +66,8 @@ export default function App() {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [wishlist, setWishlist] = useState<Wishlist | null>(null)
   const [gifts, setGifts] = useState<GiftItem[]>([])
+  const [photoUrls, setPhotoUrls] = useState<Record<string, string[]>>({})
+  const [selectedPhotos, setSelectedPhotos] = useState<File[]>([])
   const [loadingList, setLoadingList] = useState(false)
   const [editingGift, setEditingGift] = useState<GiftItem | null>(null)
   const [formOpen, setFormOpen] = useState(false)
