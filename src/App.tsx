@@ -118,10 +118,6 @@ export default function App() {
     ? avatarEmoji[profile.avatar_key] || '🎄'
     : '🎄'
 
-  const selectedAvatar = selectedProfile?.avatar_key
-    ? avatarEmoji[selectedProfile.avatar_key] || '🎄'
-    : '🎄'
-
   const countdownItems = useMemo(() => [
     ['Jours', countdown.days],
     ['Heures', countdown.hours],
