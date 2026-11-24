@@ -45,6 +45,31 @@ type PhotoViewer = {
   photoIndex: number
 } | null
 
+type ReservationParticipant = {
+  id: string
+  reservation_id: string
+  user_id: string
+  contribution_amount: number | null
+}
+
+type Reservation = {
+  id: string
+  gift_id: string
+  created_by: string
+  status: 'active' | 'cancelled'
+  participant_limit: number
+  participants: ReservationParticipant[]
+}
+
+const reservationStyles = `
+.reservation-panel{margin-top:16px;padding:13px;border:1px solid #e8e2d4;border-radius:11px;background:#f7f6ef}
+.reservation-button{width:100%;margin-top:8px;padding:0 12px}
+.reservation-status{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:0;color:#45664f;font-size:12px}
+.reservation-status span{color:#8b8d83;font-size:11px}
+.reservation-participants{font-size:11px;line-height:1.5;color:#7c8278;margin:8px 0}
+.gift-modal select{font:inherit;height:43px;border:1px solid #e7e3d8;border-radius:8px;padding:0 12px;background:#fffefa;margin-bottom:14px;color:#27372e;width:100%}
+`;
+
 const YEAR = 2026
 const target = new Date('2026-12-24T20:00:00+01:00')
 
@@ -97,6 +122,11 @@ export default function App() {
   const [selectedPhotos, setSelectedPhotos] = useState<File[]>([])
   const [giftPhotos, setGiftPhotos] = useState<Record<string, GiftPhoto[]>>({})
   const [photoViewer, setPhotoViewer] = useState<PhotoViewer>(null)
+  const [reservations, setReservations] = useState<Record<string, Reservation>>({})
+  const [reservationGift, setReservationGift] = useState<GiftItem | null>(null)
+  const [reservationLimit, setReservationLimit] = useState('2')
+  const [reservationContribution, setReservationContribution] = useState('')
+  const [reservationBusy, setReservationBusy] = useState(false)
 
   const isAdmin = profile?.role === 'admin'
   const selectedProfile =
@@ -177,6 +207,7 @@ export default function App() {
       setGifts([])
       setGiftPhotos({})
       setPhotoViewer(null)
+      setReservations({})
     }
   }, [session?.user.id])
 
@@ -270,6 +301,7 @@ export default function App() {
     setGifts([])
     setGiftPhotos({})
     setPhotoViewer(null)
+    setReservations({})
 
     try {
       let { data: wishlistData, error: wishlistError } = await supabase
@@ -317,8 +349,50 @@ export default function App() {
 
       if (loadedGifts.length === 0) {
         setGiftPhotos({})
+        setReservations({})
         return
       }
+
+      // Supabase RLS hides reservations belonging to the selected list's owner.
+      const { data: reservationData, error: reservationError } = await supabase
+        .from('reservations')
+        .select('id, gift_id, created_by, status, participant_limit')
+        .in('gift_id', loadedGifts.map(gift => gift.id))
+        .eq('status', 'active')
+
+      if (reservationError) throw reservationError
+
+      const reservationRows = reservationData || []
+      const participantsByReservation: Record<string, ReservationParticipant[]> = {}
+
+      if (reservationRows.length > 0) {
+        const { data: participantData, error: participantError } = await supabase
+          .from('reservation_participants')
+          .select('id, reservation_id, user_id, contribution_amount')
+          .in('reservation_id', reservationRows.map(row => row.id))
+
+        if (participantError) throw participantError
+
+        for (const participant of participantData || []) {
+          if (!participantsByReservation[participant.reservation_id]) {
+            participantsByReservation[participant.reservation_id] = []
+          }
+          participantsByReservation[participant.reservation_id].push(participant as ReservationParticipant)
+        }
+      }
+
+      const reservationMap: Record<string, Reservation> = {}
+      for (const row of reservationRows) {
+        // A gift has one active reservation in the interface. The database
+        // remains the source of truth and RLS controls which rows are visible.
+        if (!reservationMap[row.gift_id]) {
+          reservationMap[row.gift_id] = {
+            ...(row as Omit<Reservation, 'participants'>),
+            participants: participantsByReservation[row.id] || [],
+          }
+        }
+      }
+      setReservations(reservationMap)
 
       const { data: photoData, error: photoError } = await supabase
         .from('gift_photos')
@@ -370,6 +444,150 @@ export default function App() {
       member.id,
       member.id === session?.user.id
     )
+  }
+
+  function openReservation(item: GiftItem) {
+    setReservationGift(item)
+    setReservationLimit('2')
+    setReservationContribution(item.price == null ? '' : (item.price / 2).toFixed(2))
+  }
+
+  async function createReservation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!supabase || !session?.user.id || !reservationGift) return
+
+    const limit = Number(reservationLimit)
+    if (!Number.isInteger(limit) || limit < 1 || limit > 12) {
+      setMessage('Choisis entre 1 et 12 participants.')
+      return
+    }
+
+    const contribution = reservationContribution.trim() === ''
+      ? null
+      : Number(reservationContribution)
+    if (contribution != null && (!Number.isFinite(contribution) || contribution < 0)) {
+      setMessage('La contribution doit être un montant positif ou nul.')
+      return
+    }
+
+    setReservationBusy(true)
+    setMessage('')
+    try {
+      const { data: created, error: createError } = await supabase
+        .from('reservations')
+        .insert({
+          gift_id: reservationGift.id,
+          created_by: session.user.id,
+          status: 'active',
+          participant_limit: limit,
+        })
+        .select('id, gift_id, created_by, status, participant_limit')
+        .single()
+      if (createError) throw createError
+
+      const { error: participantError } = await supabase
+        .from('reservation_participants')
+        .insert({
+          reservation_id: created.id,
+          user_id: session.user.id,
+          contribution_amount: contribution,
+        })
+
+      if (participantError) {
+        // Roll back the visible reservation if the creator could not join it.
+        await supabase
+          .from('reservations')
+          .update({ status: 'cancelled' })
+          .eq('id', created.id)
+        throw participantError
+      }
+
+      setReservationGift(null)
+      await loadMemberList(selectedMemberId, selectedMemberId === session.user.id)
+      setMessage('Réservation créée ! Les autres membres peuvent maintenant participer.')
+    } catch (error) {
+      console.error('Erreur de création de réservation :', error)
+      setMessage("Impossible de créer la réservation. Vérifie les autorisations Supabase.")
+    } finally {
+      setReservationBusy(false)
+    }
+  }
+
+  async function joinReservation(item: GiftItem) {
+    if (!supabase || !session?.user.id) return
+    const reservation = reservations[item.id]
+    if (!reservation || reservation.participants.some(person => person.user_id === session.user.id)) return
+    if (reservation.participants.length >= reservation.participant_limit) {
+      setMessage('Cette réservation est déjà complète.')
+      return
+    }
+
+    const suggestedShare = item.price != null ? (item.price / reservation.participant_limit).toFixed(2) : ''
+    const rawAmount = window.prompt('Ta contribution en euros (laisse vide si tu ne souhaites pas préciser le montant) :', suggestedShare)
+    if (rawAmount === null) return
+    const amount = rawAmount.trim() === '' ? null : Number(rawAmount.replace(',', '.'))
+    if (amount != null && (!Number.isFinite(amount) || amount < 0)) {
+      setMessage('Entre un montant valide, positif ou nul.')
+      return
+    }
+
+    setReservationBusy(true)
+    try {
+      const { error } = await supabase
+        .from('reservation_participants')
+        .insert({
+          reservation_id: reservation.id,
+          user_id: session.user.id,
+          contribution_amount: amount,
+        })
+      if (error) throw error
+      await loadMemberList(selectedMemberId, selectedMemberId === session.user.id)
+      setMessage('Tu participes maintenant à cette réservation.')
+    } catch (error) {
+      console.error(error)
+      setMessage("Impossible de rejoindre cette réservation. Elle est peut-être complète ou déjà modifiée.")
+    } finally {
+      setReservationBusy(false)
+    }
+  }
+
+  async function leaveOrCancelReservation(item: GiftItem) {
+    if (!supabase || !session?.user.id) return
+    const reservation = reservations[item.id]
+    if (!reservation) return
+
+    const mine = reservation.participants.find(person => person.user_id === session.user.id)
+    if (!mine) return
+
+    const isCreator = reservation.created_by === session.user.id
+    const confirmation = isCreator
+      ? 'Annuler toute cette réservation ?'
+      : 'Quitter cette réservation ?'
+    if (!window.confirm(confirmation)) return
+
+    setReservationBusy(true)
+    try {
+      if (isCreator) {
+        const { error } = await supabase
+          .from('reservations')
+          .update({ status: 'cancelled' })
+          .eq('id', reservation.id)
+        if (error) throw error
+      } else {
+        const { error } = await supabase
+          .from('reservation_participants')
+          .delete()
+          .eq('id', mine.id)
+        if (error) throw error
+      }
+      await loadMemberList(selectedMemberId, selectedMemberId === session.user.id)
+      setMessage(isCreator ? 'Réservation annulée.' : 'Tu as quitté la réservation.')
+    } catch (error) {
+      console.error(error)
+      setMessage("Impossible de modifier cette réservation.")
+    } finally {
+      setReservationBusy(false)
+    }
   }
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
@@ -657,6 +875,7 @@ export default function App() {
 
   return (
     <main>
+      <style>{reservationStyles}</style>
       <div className="snow snow-one">✧</div>
       <div className="snow snow-two">❄</div>
       <div className="snow snow-three">✦</div>
@@ -966,6 +1185,45 @@ export default function App() {
                       Voir le cadeau <ArrowRight size={14}/>
                     </a>
                   )}
+
+                  {selectedMemberId !== profile?.id && (() => {
+                    const reservation = reservations[item.id]
+                    const mine = reservation?.participants.find(person => person.user_id === session?.user.id)
+                    const full = Boolean(reservation && reservation.participants.length >= reservation.participant_limit)
+                    return (
+                      <div className="reservation-panel">
+                        {!reservation ? (
+                          <button type="button" className="primary reservation-button" onClick={() => openReservation(item)} disabled={reservationBusy}>
+                            Réserver ce cadeau
+                          </button>
+                        ) : (
+                          <>
+                            <p className="reservation-status">
+                              <strong>Réservation en cours</strong>
+                              <span>{reservation.participants.length} / {reservation.participant_limit} participant(s)</span>
+                            </p>
+                            <p className="reservation-participants">
+                              Participants : {reservation.participants.map(person => {
+                                const participantProfile = familyProfiles.find(member => member.id === person.user_id)
+                                const participantName = participantProfile?.display_name || participantProfile?.username || 'Membre'
+                                const amountLabel = person.contribution_amount == null ? '' : ` (${person.contribution_amount.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })})`
+                                return `${participantName}${amountLabel}`
+                              }).join(', ')}
+                            </p>
+                            {mine ? (
+                              <button type="button" className="secondary-button reservation-button" onClick={() => void leaveOrCancelReservation(item)} disabled={reservationBusy}>
+                                {reservation.created_by === session?.user.id ? 'Annuler la réservation' : 'Quitter la réservation'}
+                              </button>
+                            ) : (
+                              <button type="button" className="primary reservation-button" onClick={() => void joinReservation(item)} disabled={reservationBusy || full}>
+                                {full ? 'Réservation complète' : 'Participer'}
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )
+                  })()}
                 </article>
               ))}
             </div>
@@ -1127,6 +1385,37 @@ export default function App() {
                   <Save size={16}/>
                   {busy ? 'Enregistrement…' : 'Enregistrer'}
                 </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {reservationGift && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={event => {
+          if (event.target === event.currentTarget) setReservationGift(null)
+        }}>
+          <section className="gift-modal" role="dialog" aria-modal="true" aria-labelledby="reservation-modal-title">
+            <div className="modal-heading">
+              <div>
+                <span className="welcome-kicker">PARTAGER UN CADEAU</span>
+                <h2 id="reservation-modal-title">Réserver « {reservationGift.title} »</h2>
+              </div>
+              <button className="icon-button" aria-label="Fermer" onClick={() => setReservationGift(null)}><X size={19}/></button>
+            </div>
+            <form onSubmit={createReservation}>
+              <label htmlFor="reservation-limit">Nombre total de participants</label>
+              <select id="reservation-limit" value={reservationLimit} onChange={event => { setReservationLimit(event.target.value); setReservationContribution(reservationGift.price == null ? '' : (reservationGift.price / Number(event.target.value)).toFixed(2)) }}>
+                {Array.from({ length: 12 }, (_, index) => index + 1).map(number => (
+                  <option key={number} value={String(number)}>{number} participant{number > 1 ? 's' : ''}</option>
+                ))}
+              </select>
+              <label htmlFor="reservation-contribution">Ta contribution (€)</label>
+              <input id="reservation-contribution" type="number" min="0" step="0.01" value={reservationContribution} onChange={event => setReservationContribution(event.target.value)} placeholder="Montant facultatif" />
+              <p className="selected-photos">Tu seras automatiquement ajouté comme premier participant. Tu pourras ensuite inviter les autres membres à participer.</p>
+              <div className="modal-buttons">
+                <button type="button" className="secondary-button" onClick={() => setReservationGift(null)}>Annuler</button>
+                <button className="primary" disabled={reservationBusy}>Créer la réservation</button>
               </div>
             </form>
           </section>
