@@ -476,6 +476,11 @@ export default function App() {
     setReservationError('')
     setMessage('')
     try {
+      console.log('Diagnostic réservation :', {
+  userId: session?.user.id,
+  giftId: reservationGift.id,
+  hasSession: Boolean(session),
+})
       const { data: created, error: createError } = await supabase
         .from('reservations')
         .insert({
