@@ -3,7 +3,7 @@ import type { FormEvent } from 'react'
 import {
   ArrowRight, Gift, LogOut, Plus, Save, Snowflake,
   Trash2, TreePine, Pencil, X, UserRound,
-  ChevronLeft, ChevronRight, Users,
+  ChevronLeft, ChevronRight, Users, Heart,
 } from 'lucide-react'
 import { supabase, supabaseReady } from './supabase'
 import type { Session } from '@supabase/supabase-js'
