@@ -1,3 +1,4 @@
+
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
@@ -68,7 +69,14 @@ const reservationStyles = `
 .reservation-status span{color:#8b8d83;font-size:11px}
 .reservation-participants{font-size:11px;line-height:1.5;color:#7c8278;margin:8px 0}
 .gift-modal select{font:inherit;height:43px;border:1px solid #e7e3d8;border-radius:8px;padding:0 12px;background:#fffefa;margin-bottom:14px;color:#27372e;width:100%}
-`;
+
+/* Coups de cœur */
+.favorite-button{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;flex-shrink:0;border:1px solid #e8e2d4;border-radius:50%;background:#fffefa;color:#9a9488;cursor:pointer;transition:all .2s ease}
+.favorite-button:hover{border-color:#c94d54;color:#c94d54}
+.favorite-button.is-favorite{color:#c94d54;background:#fff0f0;border-color:#f0d0d0}
+.favorite-button:disabled{opacity:.55;cursor:wait}
+.favorite-filters{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}
+`
 
 const YEAR = 2026
 const target = new Date('2026-12-24T20:00:00+01:00')
@@ -110,6 +118,11 @@ export default function App() {
   const [wishlist, setWishlist] = useState<Wishlist | null>(null)
   const [gifts, setGifts] = useState<GiftItem[]>([])
   const [loadingList, setLoadingList] = useState(false)
+
+  // États des coups de cœur
+  const [favoriteGiftIds, setFavoriteGiftIds] = useState<string[]>([])
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
+  const [favoriteBusyIds, setFavoriteBusyIds] = useState<string[]>([])
 
   const [editingGift, setEditingGift] = useState<GiftItem | null>(null)
   const [formOpen, setFormOpen] = useState(false)
@@ -169,6 +182,11 @@ export default function App() {
     ? gifts.find(gift => gift.id === photoViewer.giftId)
     : null
 
+  // Cadeaux affichés selon le filtre choisi
+  const displayedGifts = showFavoritesOnly
+    ? gifts.filter(gift => favoriteGiftIds.includes(gift.id))
+    : gifts
+
   useEffect(() => {
     const timer = window.setInterval(
       () => setCountdown(getCountdown()),
@@ -209,6 +227,9 @@ export default function App() {
       setGiftPhotos({})
       setPhotoViewer(null)
       setReservations({})
+      setFavoriteGiftIds([])
+      setShowFavoritesOnly(false)
+      setFavoriteBusyIds([])
     }
   }, [session?.user.id])
 
@@ -303,6 +324,7 @@ export default function App() {
     setGiftPhotos({})
     setPhotoViewer(null)
     setReservations({})
+    setFavoriteGiftIds([])
 
     try {
       let { data: wishlistData, error: wishlistError } = await supabase
@@ -348,13 +370,27 @@ export default function App() {
       const loadedGifts = (giftData || []) as GiftItem[]
       setGifts(loadedGifts)
 
+      // Chargement des favoris du compte connecté
+      if (session?.user.id && loadedGifts.length > 0) {
+        const { data: favoriteData, error: favoriteError } = await supabase
+          .from('gift_favorites')
+          .select('gift_id')
+          .eq('user_id', session.user.id)
+          .in('gift_id', loadedGifts.map(gift => gift.id))
+
+        if (favoriteError) throw favoriteError
+
+        setFavoriteGiftIds(
+          (favoriteData || []).map(row => row.gift_id)
+        )
+      }
+
       if (loadedGifts.length === 0) {
         setGiftPhotos({})
         setReservations({})
         return
       }
 
-      // Supabase RLS hides reservations belonging to the selected list's owner.
       const { data: reservationData, error: reservationError } = await supabase
         .from('reservations')
         .select('id, gift_id, created_by, status, participant_limit')
@@ -384,8 +420,6 @@ export default function App() {
 
       const reservationMap: Record<string, Reservation> = {}
       for (const row of reservationRows) {
-        // A gift has one active reservation in the interface. The database
-        // remains the source of truth and RLS controls which rows are visible.
         if (!reservationMap[row.gift_id]) {
           reservationMap[row.gift_id] = {
             ...(row as Omit<Reservation, 'participants'>),
@@ -447,6 +481,54 @@ export default function App() {
     )
   }
 
+  // Ajouter ou retirer un coup de cœur
+  async function toggleFavorite(item: GiftItem) {
+    if (!supabase || !session?.user.id) return
+
+    const isFavorite = favoriteGiftIds.includes(item.id)
+
+    setFavoriteBusyIds(current => [...current, item.id])
+    setMessage('')
+
+    try {
+      if (isFavorite) {
+        const { error } = await supabase
+          .from('gift_favorites')
+          .delete()
+          .eq('user_id', session.user.id)
+          .eq('gift_id', item.id)
+
+        if (error) throw error
+
+        setFavoriteGiftIds(current =>
+          current.filter(id => id !== item.id)
+        )
+      } else {
+        const { error } = await supabase
+          .from('gift_favorites')
+          .insert({
+            user_id: session.user.id,
+            gift_id: item.id,
+          })
+
+        if (error) throw error
+
+        setFavoriteGiftIds(current =>
+          current.includes(item.id) ? current : [...current, item.id]
+        )
+      }
+    } catch (error) {
+      console.error('Erreur de mise à jour du favori :', error)
+      setMessage(
+        "Impossible de modifier ce favori. Vérifie les autorisations Supabase."
+      )
+    } finally {
+      setFavoriteBusyIds(current =>
+        current.filter(id => id !== item.id)
+      )
+    }
+  }
+
   function openReservation(item: GiftItem) {
     setReservationError('')
     setReservationGift(item)
@@ -476,11 +558,6 @@ export default function App() {
     setReservationError('')
     setMessage('')
     try {
-      console.log('Diagnostic réservation :', {
-  userId: session?.user.id,
-  giftId: reservationGift.id,
-  hasSession: Boolean(session),
-})
       const { data: created, error: createError } = await supabase
         .from('reservations')
         .insert({
@@ -502,7 +579,6 @@ export default function App() {
         })
 
       if (participantError) {
-        // Roll back the visible reservation if the creator could not join it.
         await supabase
           .from('reservations')
           .update({ status: 'cancelled' })
@@ -874,6 +950,10 @@ export default function App() {
       current.filter(gift => gift.id !== item.id)
     )
 
+    setFavoriteGiftIds(current =>
+      current.filter(id => id !== item.id)
+    )
+
     setGiftPhotos(current => {
       const updated = { ...current }
       delete updated[item.id]
@@ -1121,124 +1201,184 @@ export default function App() {
             </div>
           )}
 
-          {!loadingList && gifts.length > 0 && (
-            <div className="gift-grid">
-              {gifts.map(item => (
-                <article className="gift-card" key={item.id}>
-                  <div className="gift-card-top">
-                    <span className="gift-card-icon">🎁</span>
+          {!loadingList && wishlist && gifts.length > 0 && (
+            <>
+              <div className="favorite-filters">
+                <button
+                  type="button"
+                  className={!showFavoritesOnly ? 'primary' : 'secondary-button'}
+                  onClick={() => setShowFavoritesOnly(false)}
+                >
+                  Tous les cadeaux
+                </button>
 
-                    {canManageSelectedList && (
-                      <div className="gift-actions">
-                        <button
-                          className="icon-button"
-                          aria-label="Modifier le cadeau"
-                          onClick={() => openEditGift(item)}
-                        >
-                          <Pencil size={16}/>
-                        </button>
+                <button
+                  type="button"
+                  className={showFavoritesOnly ? 'primary' : 'secondary-button'}
+                  onClick={() => setShowFavoritesOnly(true)}
+                >
+                  <Heart
+                    size={15}
+                    fill={showFavoritesOnly ? 'currentColor' : 'none'}
+                  />
+                  Mes coups de cœur ({favoriteGiftIds.length})
+                </button>
+              </div>
 
-                        <button
-                          className="icon-button delete"
-                          aria-label="Supprimer le cadeau"
-                          onClick={() => void deleteGift(item)}
-                        >
-                          <Trash2 size={16}/>
-                        </button>
-                      </div>
-                    )}
+              {displayedGifts.length === 0 ? (
+                <div className="empty-state">
+                  <div className="empty-icon">
+                    <Heart size={25}/>
                   </div>
+                  <h3>Aucun coup de cœur pour le moment</h3>
+                  <p>
+                    Appuie sur le cœur d'un cadeau pour l'ajouter à tes favoris.
+                  </p>
+                </div>
+              ) : (
+                <div className="gift-grid">
+                  {displayedGifts.map(item => {
+                    const isFavorite = favoriteGiftIds.includes(item.id)
 
-                  {giftPhotos[item.id]?.length > 0 && (
-                    <div className="gift-photos">
-                      {giftPhotos[item.id].map((photo, index) => (
-                        <button
-                          key={photo.id}
-                          type="button"
-                          className="gift-photo-button"
-                          onClick={() => openPhotoViewer(item.id, index)}
-                          aria-label={`Afficher la photo ${index + 1} en grand`}
-                        >
-                          <img
-                            src={photo.url}
-                            alt={`Photo du cadeau ${item.title}`}
-                            loading="lazy"
-                          />
-                          <span className="photo-zoom-hint">Agrandir</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-
-                  <h3>{item.title}</h3>
-
-                  {item.price != null && (
-                    <p className="gift-price">
-                      {item.price.toLocaleString('fr-FR', {
-                        style: 'currency',
-                        currency: 'EUR',
-                      })}
-                    </p>
-                  )}
-
-                  {item.description && (
-                    <p className="gift-description">
-                      {item.description}
-                    </p>
-                  )}
-
-                  {item.link && (
-                    <a
-                      className="gift-link"
-                      href={item.link}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Voir le cadeau <ArrowRight size={14}/>
-                    </a>
-                  )}
-
-                  {selectedMemberId !== profile?.id && (() => {
-                    const reservation = reservations[item.id]
-                    const mine = reservation?.participants.find(person => person.user_id === session?.user.id)
-                    const full = Boolean(reservation && reservation.participants.length >= reservation.participant_limit)
                     return (
-                      <div className="reservation-panel">
-                        {!reservation ? (
-                          <button type="button" className="primary reservation-button" onClick={() => openReservation(item)} disabled={reservationBusy}>
-                            Réserver ce cadeau
-                          </button>
-                        ) : (
-                          <>
-                            <p className="reservation-status">
-                              <strong>Réservation en cours</strong>
-                              <span>{reservation.participants.length} / {reservation.participant_limit} participant(s)</span>
-                            </p>
-                            <p className="reservation-participants">
-                              Participants : {reservation.participants.map(person => {
-                                const participantProfile = familyProfiles.find(member => member.id === person.user_id)
-                                const participantName = participantProfile?.display_name || participantProfile?.username || 'Membre'
-                                const amountLabel = person.contribution_amount == null ? '' : ` (${person.contribution_amount.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })})`
-                                return `${participantName}${amountLabel}`
-                              }).join(', ')}
-                            </p>
-                            {mine ? (
-                              <button type="button" className="secondary-button reservation-button" onClick={() => void leaveOrCancelReservation(item)} disabled={reservationBusy}>
-                                {reservation.created_by === session?.user.id ? 'Annuler la réservation' : 'Quitter la réservation'}
-                              </button>
-                            ) : (
-                              <button type="button" className="primary reservation-button" onClick={() => void joinReservation(item)} disabled={reservationBusy || full}>
-                                {full ? 'Réservation complète' : 'Participer'}
-                              </button>
+                      <article className="gift-card" key={item.id}>
+                        <div className="gift-card-top">
+                          <span className="gift-card-icon">🎁</span>
+
+                          <div className="gift-actions">
+                            <button
+                              type="button"
+                              className={`favorite-button ${isFavorite ? 'is-favorite' : ''}`}
+                              aria-label={
+                                isFavorite
+                                  ? 'Retirer des coups de cœur'
+                                  : 'Ajouter aux coups de cœur'
+                              }
+                              aria-pressed={isFavorite}
+                              disabled={favoriteBusyIds.includes(item.id)}
+                              onClick={() => void toggleFavorite(item)}
+                            >
+                              <Heart
+                                size={20}
+                                fill={isFavorite ? 'currentColor' : 'none'}
+                              />
+                            </button>
+
+                            {canManageSelectedList && (
+                              <>
+                                <button
+                                  className="icon-button"
+                                  aria-label="Modifier le cadeau"
+                                  onClick={() => openEditGift(item)}
+                                >
+                                  <Pencil size={16}/>
+                                </button>
+
+                                <button
+                                  className="icon-button delete"
+                                  aria-label="Supprimer le cadeau"
+                                  onClick={() => void deleteGift(item)}
+                                >
+                                  <Trash2 size={16}/>
+                                </button>
+                              </>
                             )}
-                          </>
+                          </div>
+                        </div>
+
+                        {giftPhotos[item.id]?.length > 0 && (
+                          <div className="gift-photos">
+                            {giftPhotos[item.id].map((photo, index) => (
+                              <button
+                                key={photo.id}
+                                type="button"
+                                className="gift-photo-button"
+                                onClick={() => openPhotoViewer(item.id, index)}
+                                aria-label={`Afficher la photo ${index + 1} en grand`}
+                              >
+                                <img
+                                  src={photo.url}
+                                  alt={`Photo du cadeau ${item.title}`}
+                                  loading="lazy"
+                                />
+                                <span className="photo-zoom-hint">Agrandir</span>
+                              </button>
+                            ))}
+                          </div>
                         )}
-                      </div>
+
+                        <h3>{item.title}</h3>
+
+                        {item.price != null && (
+                          <p className="gift-price">
+                            {item.price.toLocaleString('fr-FR', {
+                              style: 'currency',
+                              currency: 'EUR',
+                            })}
+                          </p>
+                        )}
+
+                        {item.description && (
+                          <p className="gift-description">
+                            {item.description}
+                          </p>
+                        )}
+
+                        {item.link && (
+                          <a
+                            className="gift-link"
+                            href={item.link}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Voir le cadeau <ArrowRight size={14}/>
+                          </a>
+                        )}
+
+                        {selectedMemberId !== profile?.id && (() => {
+                          const reservation = reservations[item.id]
+                          const mine = reservation?.participants.find(person => person.user_id === session?.user.id)
+                          const full = Boolean(reservation && reservation.participants.length >= reservation.participant_limit)
+                          return (
+                            <div className="reservation-panel">
+                              {!reservation ? (
+                                <button type="button" className="primary reservation-button" onClick={() => openReservation(item)} disabled={reservationBusy}>
+                                  Réserver ce cadeau
+                                </button>
+                              ) : (
+                                <>
+                                  <p className="reservation-status">
+                                    <strong>Réservation en cours</strong>
+                                    <span>{reservation.participants.length} / {reservation.participant_limit} participant(s)</span>
+                                  </p>
+                                  <p className="reservation-participants">
+                                    Participants : {reservation.participants.map(person => {
+                                      const participantProfile = familyProfiles.find(member => member.id === person.user_id)
+                                      const participantName = participantProfile?.display_name || participantProfile?.username || 'Membre'
+                                      const amountLabel = person.contribution_amount == null ? '' : ` (${person.contribution_amount.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })})`
+                                      return `${participantName}${amountLabel}`
+                                    }).join(', ')}
+                                  </p>
+                                  {mine ? (
+                                    <button type="button" className="secondary-button reservation-button" onClick={() => void leaveOrCancelReservation(item)} disabled={reservationBusy}>
+                                      {reservation.created_by === session?.user.id ? 'Annuler la réservation' : 'Quitter la réservation'}
+                                    </button>
+                                  ) : (
+                                    <button type="button" className="primary reservation-button" onClick={() => void joinReservation(item)} disabled={reservationBusy || full}>
+                                      {full ? 'Réservation complète' : 'Participer'}
+                                    </button>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          )
+                        })()}
+                      </article>
                     )
-                  })()}
-                </article>
-              ))}
-            </div>
+                  })}
+                </div>
+              )}
+            </>
           )}
 
           {message && (
