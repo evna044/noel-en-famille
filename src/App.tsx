@@ -127,6 +127,7 @@ export default function App() {
   const [reservationLimit, setReservationLimit] = useState('2')
   const [reservationContribution, setReservationContribution] = useState('')
   const [reservationBusy, setReservationBusy] = useState(false)
+  const [reservationError, setReservationError] = useState('')
 
   const isAdmin = profile?.role === 'admin'
   const selectedProfile =
@@ -447,6 +448,7 @@ export default function App() {
   }
 
   function openReservation(item: GiftItem) {
+    setReservationError('')
     setReservationGift(item)
     setReservationLimit('2')
     setReservationContribution(item.price == null ? '' : (item.price / 2).toFixed(2))
@@ -471,6 +473,7 @@ export default function App() {
     }
 
     setReservationBusy(true)
+    setReservationError('')
     setMessage('')
     try {
       const { data: created, error: createError } = await supabase
@@ -507,7 +510,11 @@ export default function App() {
       setMessage('Réservation créée ! Les autres membres peuvent maintenant participer.')
     } catch (error) {
       console.error('Erreur de création de réservation :', error)
-      setMessage("Impossible de créer la réservation. Vérifie les autorisations Supabase.")
+      const detail = error as { message?: string; code?: string; details?: string; hint?: string }
+      const diagnostic = [detail.message, detail.details, detail.hint, detail.code ? `Code : ${detail.code}` : '']
+        .filter(Boolean)
+        .join(' — ')
+      setReservationError(diagnostic || 'Erreur inconnue lors de la création de la réservation.')
     } finally {
       setReservationBusy(false)
     }
@@ -1413,9 +1420,14 @@ export default function App() {
               <label htmlFor="reservation-contribution">Ta contribution (€)</label>
               <input id="reservation-contribution" type="number" min="0" step="0.01" value={reservationContribution} onChange={event => setReservationContribution(event.target.value)} placeholder="Montant facultatif" />
               <p className="selected-photos">Tu seras automatiquement ajouté comme premier participant. Tu pourras ensuite inviter les autres membres à participer.</p>
+              {reservationError && (
+                <p role="alert" style={{ color: '#a04438', background: '#fff0ed', border: '1px solid #f0c9c2', borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+                  La réservation n'a pas pu être créée : {reservationError}
+                </p>
+              )}
               <div className="modal-buttons">
                 <button type="button" className="secondary-button" onClick={() => setReservationGift(null)}>Annuler</button>
-                <button className="primary" disabled={reservationBusy}>Créer la réservation</button>
+                <button type="submit" className="primary" disabled={reservationBusy}>{reservationBusy ? 'Création…' : 'Créer la réservation'}</button>
               </div>
             </form>
           </section>
