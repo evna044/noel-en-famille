@@ -1,10 +1,9 @@
-
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   ArrowRight, Gift, LogOut, Plus, Save, Snowflake,
   Trash2, TreePine, Pencil, X, UserRound,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, Users,
 } from 'lucide-react'
 import { supabase, supabaseReady } from './supabase'
 import type { Session } from '@supabase/supabase-js'
@@ -49,17 +48,6 @@ type PhotoViewer = {
 const YEAR = 2026
 const target = new Date('2026-12-24T20:00:00+01:00')
 
-function getCountdown() {
-  const distance = Math.max(0, target.getTime() - Date.now())
-
-  return {
-    days: Math.floor(distance / 86400000),
-    hours: Math.floor((distance % 86400000) / 3600000),
-    minutes: Math.floor((distance % 3600000) / 60000),
-    seconds: Math.floor((distance % 60000) / 1000),
-  }
-}
-
 const avatarEmoji: Record<string, string> = {
   santa: '🎅',
   reindeer: '🦌',
@@ -69,6 +57,17 @@ const avatarEmoji: Record<string, string> = {
   penguin: '🐧',
   tree: '🎄',
   gingerbread: '🍪',
+}
+
+function getCountdown() {
+  const distance = Math.max(0, target.getTime() - Date.now())
+
+  return {
+    days: Math.floor(distance / 86400000),
+    hours: Math.floor((distance % 86400000) / 3600000),
+    minutes: Math.floor((distance % 3600000) / 60000),
+    seconds: Math.floor((distance % 60000) / 1000),
+  }
 }
 
 export default function App() {
@@ -81,6 +80,8 @@ export default function App() {
   const [message, setMessage] = useState('')
 
   const [profile, setProfile] = useState<Profile | null>(null)
+  const [familyProfiles, setFamilyProfiles] = useState<Profile[]>([])
+  const [selectedMemberId, setSelectedMemberId] = useState('')
   const [wishlist, setWishlist] = useState<Wishlist | null>(null)
   const [gifts, setGifts] = useState<GiftItem[]>([])
   const [loadingList, setLoadingList] = useState(false)
@@ -96,6 +97,50 @@ export default function App() {
   const [selectedPhotos, setSelectedPhotos] = useState<File[]>([])
   const [giftPhotos, setGiftPhotos] = useState<Record<string, GiftPhoto[]>>({})
   const [photoViewer, setPhotoViewer] = useState<PhotoViewer>(null)
+
+  const isAdmin = profile?.role === 'admin'
+  const selectedProfile =
+    familyProfiles.find(member => member.id === selectedMemberId) || profile
+
+  const canManageSelectedList =
+    Boolean(profile && selectedProfile) &&
+    (isAdmin || selectedMemberId === profile?.id)
+
+  const displayName =
+    profile?.display_name || profile?.username || 'Membre de la famille'
+
+  const selectedDisplayName =
+    selectedProfile?.display_name ||
+    selectedProfile?.username ||
+    'Membre de la famille'
+
+  const avatar = profile?.avatar_key
+    ? avatarEmoji[profile.avatar_key] || '🎄'
+    : '🎄'
+
+  const selectedAvatar = selectedProfile?.avatar_key
+    ? avatarEmoji[selectedProfile.avatar_key] || '🎄'
+    : '🎄'
+
+  const countdownItems = useMemo(() => [
+    ['Jours', countdown.days],
+    ['Heures', countdown.hours],
+    ['Minutes', countdown.minutes],
+    ['Secondes', countdown.seconds],
+  ] as const, [countdown])
+
+  const viewerPhotos = photoViewer
+    ? giftPhotos[photoViewer.giftId] || []
+    : []
+
+  const currentViewerPhoto =
+    photoViewer && viewerPhotos.length > 0
+      ? viewerPhotos[photoViewer.photoIndex]
+      : null
+
+  const currentViewerGift = photoViewer
+    ? gifts.find(gift => gift.id === photoViewer.giftId)
+    : null
 
   useEffect(() => {
     const timer = window.setInterval(
@@ -127,9 +172,11 @@ export default function App() {
 
   useEffect(() => {
     if (session?.user.id) {
-      void loadFamilyList(session.user.id)
+      void loadFamily(session.user.id)
     } else {
       setProfile(null)
+      setFamilyProfiles([])
+      setSelectedMemberId('')
       setWishlist(null)
       setGifts([])
       setGiftPhotos({})
@@ -148,7 +195,6 @@ export default function App() {
       if (event.key === 'ArrowLeft') {
         setPhotoViewer(current => {
           if (!current) return null
-
           const photos = giftPhotos[current.giftId] || []
           if (photos.length === 0) return null
 
@@ -163,7 +209,6 @@ export default function App() {
       if (event.key === 'ArrowRight') {
         setPhotoViewer(current => {
           if (!current) return null
-
           const photos = giftPhotos[current.giftId] || []
           if (photos.length === 0) return null
 
@@ -176,73 +221,98 @@ export default function App() {
     }
 
     window.addEventListener('keydown', handleKeyDown)
-
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown)
-    }
+    return () => window.removeEventListener('keydown', handleKeyDown)
   }, [photoViewer, giftPhotos])
 
-  const countdownItems = useMemo(() => [
-    ['Jours', countdown.days],
-    ['Heures', countdown.hours],
-    ['Minutes', countdown.minutes],
-    ['Secondes', countdown.seconds],
-  ] as const, [countdown])
-
-  async function loadFamilyList(userId: string) {
+  async function loadFamily(userId: string) {
     if (!supabase) return
 
-    const client = supabase
     setLoadingList(true)
     setMessage('')
 
     try {
-      const { data: profileData, error: profileError } =
-        await client
-          .from('profiles')
-          .select('id, username, display_name, avatar_key, role')
-          .eq('id', userId)
-          .maybeSingle()
+      const { data: profileData, error: profileError } = await supabase
+        .from('profiles')
+        .select('id, username, display_name, avatar_key, role')
+        .eq('id', userId)
+        .maybeSingle()
 
       if (profileError) throw profileError
+      if (!profileData) throw new Error('Profil introuvable.')
 
-      setProfile(profileData as Profile | null)
+      const currentProfile = profileData as Profile
+      setProfile(currentProfile)
 
-      let { data: wishlistData, error: wishlistError } =
-        await client
-          .from('wishlist_years')
-          .select('id, owner_id, year, archived')
-          .eq('owner_id', userId)
-          .eq('year', YEAR)
-          .maybeSingle()
+      const { data: membersData, error: membersError } = await supabase
+        .from('profiles')
+        .select('id, username, display_name, avatar_key, role')
+        .order('username', { ascending: true })
+
+      if (membersError) throw membersError
+
+      const members = (membersData || []) as Profile[]
+      setFamilyProfiles(members)
+
+      setSelectedMemberId(userId)
+      await loadMemberList(userId, true)
+    } catch (error) {
+      console.error('Erreur de chargement de la famille :', error)
+      setMessage(
+        "Impossible de charger les profils familiaux. Vérifie les autorisations Supabase."
+      )
+    } finally {
+      setLoadingList(false)
+    }
+  }
+
+  async function loadMemberList(ownerId: string, createIfMissing = false) {
+    if (!supabase) return
+
+    setLoadingList(true)
+    setMessage('')
+    setWishlist(null)
+    setGifts([])
+    setGiftPhotos({})
+    setPhotoViewer(null)
+
+    try {
+      let { data: wishlistData, error: wishlistError } = await supabase
+        .from('wishlist_years')
+        .select('id, owner_id, year, archived')
+        .eq('owner_id', ownerId)
+        .eq('year', YEAR)
+        .maybeSingle()
 
       if (wishlistError) throw wishlistError
 
-      if (!wishlistData) {
-        const { data: createdWishlist, error: createError } =
-          await client
-            .from('wishlist_years')
-            .insert({
-              owner_id: userId,
-              year: YEAR,
-              archived: false,
-            })
-            .select('id, owner_id, year, archived')
-            .single()
+      if (!wishlistData && createIfMissing) {
+        const { data: createdWishlist, error: createError } = await supabase
+          .from('wishlist_years')
+          .insert({
+            owner_id: ownerId,
+            year: YEAR,
+            archived: false,
+          })
+          .select('id, owner_id, year, archived')
+          .single()
 
         if (createError) throw createError
-
         wishlistData = createdWishlist
+      }
+
+      if (!wishlistData) {
+        setWishlist(null)
+        setGifts([])
+        return
       }
 
       setWishlist(wishlistData as Wishlist)
 
-      const { data: giftData, error: giftsError } =
-        await client
-          .from('gifts')
-          .select('id, wishlist_id, title, price, link, description')
-          .eq('wishlist_id', wishlistData.id)
-          .order('created_at', { ascending: false })
+      const { data: giftData, error: giftsError } = await supabase
+        .from('gifts')
+        .select('id, wishlist_id, title, price, link, description')
+        .eq('wishlist_id', wishlistData.id)
+        .order('created_at', { ascending: false })
 
       if (giftsError) throw giftsError
 
@@ -251,52 +321,59 @@ export default function App() {
 
       if (loadedGifts.length === 0) {
         setGiftPhotos({})
-      } else {
-        const { data: photoData, error: photoError } = await client
-          .from('gift_photos')
-          .select('id, gift_id, storage_path, sort_order')
-          .in('gift_id', loadedGifts.map(gift => gift.id))
-          .order('sort_order', { ascending: true })
-
-        if (photoError) throw photoError
-
-        const photos: Record<string, GiftPhoto[]> = {}
-
-        for (const photo of photoData || []) {
-          const { data: signedPhoto, error: signedError } = await client
-            .storage
-            .from('gift-photos')
-            .createSignedUrl(photo.storage_path, 3600)
-
-          if (signedError) {
-            console.error(signedError)
-            continue
-          }
-
-          if (signedPhoto?.signedUrl) {
-            if (!photos[photo.gift_id]) {
-              photos[photo.gift_id] = []
-            }
-
-            photos[photo.gift_id].push({
-              ...photo,
-              url: signedPhoto.signedUrl,
-            })
-          }
-        }
-
-        setGiftPhotos(photos)
+        return
       }
 
-    } catch (error) {
-      console.error('Erreur de chargement :', error)
+      const { data: photoData, error: photoError } = await supabase
+        .from('gift_photos')
+        .select('id, gift_id, storage_path, sort_order')
+        .in('gift_id', loadedGifts.map(gift => gift.id))
+        .order('sort_order', { ascending: true })
 
+      if (photoError) throw photoError
+
+      const photos: Record<string, GiftPhoto[]> = {}
+
+      for (const photo of photoData || []) {
+        const { data: signedPhoto, error: signedError } = await supabase
+          .storage
+          .from('gift-photos')
+          .createSignedUrl(photo.storage_path, 3600)
+
+        if (signedError) {
+          console.error(signedError)
+          continue
+        }
+
+        if (signedPhoto?.signedUrl) {
+          if (!photos[photo.gift_id]) {
+            photos[photo.gift_id] = []
+          }
+
+          photos[photo.gift_id].push({
+            ...photo,
+            url: signedPhoto.signedUrl,
+          })
+        }
+      }
+
+      setGiftPhotos(photos)
+    } catch (error) {
+      console.error('Erreur de chargement de la liste :', error)
       setMessage(
-        "Impossible de charger ta liste. Vérifie les autorisations Supabase et réessaie."
+        "Impossible de charger cette liste. Vérifie les autorisations Supabase."
       )
     } finally {
       setLoadingList(false)
     }
+  }
+
+  async function selectMember(member: Profile) {
+    setSelectedMemberId(member.id)
+    await loadMemberList(
+      member.id,
+      member.id === session?.user.id
+    )
   }
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
@@ -344,6 +421,8 @@ export default function App() {
   }
 
   function openNewGift() {
+    if (!canManageSelectedList || !wishlist) return
+
     setEditingGift(null)
     setGiftTitle('')
     setGiftPrice('')
@@ -354,6 +433,8 @@ export default function App() {
   }
 
   function openEditGift(item: GiftItem) {
+    if (!canManageSelectedList) return
+
     setEditingGift(item)
     setGiftTitle(item.title)
     setGiftPrice(item.price == null ? '' : String(item.price))
@@ -370,7 +451,6 @@ export default function App() {
   function showPreviousPhoto() {
     setPhotoViewer(current => {
       if (!current) return null
-
       const photos = giftPhotos[current.giftId] || []
       if (photos.length === 0) return null
 
@@ -385,7 +465,6 @@ export default function App() {
   function showNextPhoto() {
     setPhotoViewer(current => {
       if (!current) return null
-
       const photos = giftPhotos[current.giftId] || []
       if (photos.length === 0) return null
 
@@ -400,6 +479,7 @@ export default function App() {
     event.preventDefault()
 
     if (!supabase || !wishlist || !giftTitle.trim()) return
+    if (!canManageSelectedList) return
 
     setBusy(true)
     setMessage('')
@@ -491,13 +571,12 @@ export default function App() {
       setFormOpen(false)
       setSelectedPhotos([])
 
-      if (session?.user.id) {
-        await loadFamilyList(session.user.id)
-      }
-
+      await loadMemberList(
+        selectedMemberId,
+        selectedMemberId === session?.user.id
+      )
     } catch (error) {
       console.error('Erreur lors de l’enregistrement :', error)
-
       setMessage(
         "Le cadeau ou certaines photos n'ont pas pu être enregistrés. Vérifie les autorisations Supabase."
       )
@@ -507,11 +586,9 @@ export default function App() {
   }
 
   async function deletePhoto(photo: GiftPhoto) {
-    if (!supabase) return
+    if (!supabase || !canManageSelectedList) return
 
-    if (!window.confirm('Supprimer cette photo ?')) {
-      return
-    }
+    if (!window.confirm('Supprimer cette photo ?')) return
 
     setBusy(true)
     setMessage('')
@@ -541,7 +618,6 @@ export default function App() {
           "La photo a été retirée de la liste, mais son fichier n'a pas pu être supprimé du stockage."
         )
       }
-
     } catch (error) {
       console.error(error)
       setMessage("Impossible de supprimer cette photo.")
@@ -551,11 +627,9 @@ export default function App() {
   }
 
   async function deleteGift(item: GiftItem) {
-    if (!supabase) return
+    if (!supabase || !canManageSelectedList) return
 
-    if (!window.confirm(`Supprimer « ${item.title} » ?`)) {
-      return
-    }
+    if (!window.confirm(`Supprimer « ${item.title} » ?`)) return
 
     const { error } = await supabase
       .from('gifts')
@@ -584,28 +658,6 @@ export default function App() {
       current?.giftId === item.id ? null : current
     )
   }
-
-  const displayName =
-    profile?.display_name ||
-    profile?.username ||
-    'Membre de la famille'
-
-  const avatar = profile?.avatar_key
-    ? (avatarEmoji[profile.avatar_key] || '🎄')
-    : '🎄'
-
-  const viewerPhotos = photoViewer
-    ? giftPhotos[photoViewer.giftId] || []
-    : []
-
-  const currentViewerPhoto =
-    photoViewer && viewerPhotos.length > 0
-      ? viewerPhotos[photoViewer.photoIndex]
-      : null
-
-  const currentViewerGift = photoViewer
-    ? gifts.find(gift => gift.id === photoViewer.giftId)
-    : null
 
   return (
     <main>
@@ -736,9 +788,7 @@ export default function App() {
               </span>
               <h2>Bonjour {displayName} !</h2>
               <p>
-                {profile?.role === 'admin'
-                  ? 'Administrateur'
-                  : 'Membre de la famille'}
+                {isAdmin ? 'Administrateur' : 'Membre de la famille'}
                 {' · Préparons Noël ensemble.'}
               </p>
             </div>
@@ -748,60 +798,128 @@ export default function App() {
             </button>
           </div>
 
+          <div className="family-heading">
+            <div>
+              <span className="welcome-kicker">NOTRE PETITE TRIBU</span>
+              <h2><Users size={23}/> La famille</h2>
+              <p>Choisis un membre pour découvrir sa liste de Noël.</p>
+            </div>
+          </div>
+
+          {loadingList && familyProfiles.length === 0 && (
+            <p className="empty-state">Chargement de la famille…</p>
+          )}
+
+          <div className="family-members">
+            {familyProfiles.map(member => {
+              const memberName =
+                member.display_name || member.username
+
+              return (
+                <button
+                  type="button"
+                  key={member.id}
+                  className={`member-card ${
+                    selectedMemberId === member.id ? 'selected' : ''
+                  }`}
+                  onClick={() => void selectMember(member)}
+                >
+                  <span className="member-avatar">
+                    {avatarEmoji[member.avatar_key] || '🎄'}
+                  </span>
+                  <span className="member-name">{memberName}</span>
+                  <span className="member-username">
+                    @{member.username}
+                  </span>
+                  {member.id === profile?.id && (
+                    <span className="member-you">C'est toi</span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+
           <div className="list-heading">
             <div>
               <span className="welcome-kicker">ÉDITION {YEAR}</span>
-              <h2>Ma liste de cadeaux</h2>
+              <h2>
+                {selectedMemberId === profile?.id
+                  ? 'Ma liste de cadeaux'
+                  : `La liste de ${selectedDisplayName}`}
+              </h2>
             </div>
 
-            <button className="primary add-button" onClick={openNewGift}>
-              <Plus size={17}/> Ajouter un cadeau
-            </button>
+            {canManageSelectedList && wishlist && (
+              <button className="primary add-button" onClick={openNewGift}>
+                <Plus size={17}/> Ajouter un cadeau
+              </button>
+            )}
           </div>
 
-          {loadingList && (
-            <p className="empty-state">Préparation de ton espace…</p>
-          )}
-
-          {!loadingList && gifts.length === 0 && (
+          {!loadingList && !wishlist && (
             <div className="empty-state">
               <div className="empty-icon">
                 <Gift size={25}/>
               </div>
-              <h3>Ta liste est encore vide</h3>
+              <h3>Cette liste n'est pas encore créée</h3>
               <p>
-                Ajoute ton premier souhait pour commencer ta liste de Noël.
+                {selectedMemberId === profile?.id
+                  ? 'Ta liste sera créée dès que ton espace sera prêt.'
+                  : `${selectedDisplayName} n'a pas encore ouvert son espace pour créer sa liste.`}
               </p>
-              <button className="primary" onClick={openNewGift}>
-                <Plus size={17}/> Ajouter mon premier cadeau
-              </button>
             </div>
           )}
 
-          {gifts.length > 0 && (
+          {loadingList && (
+            <p className="empty-state">Chargement de la liste…</p>
+          )}
+
+          {!loadingList && wishlist && gifts.length === 0 && (
+            <div className="empty-state">
+              <div className="empty-icon">
+                <Gift size={25}/>
+              </div>
+              <h3>Cette liste est encore vide</h3>
+              <p>
+                {canManageSelectedList
+                  ? 'Ajoute ton premier souhait pour commencer ta liste de Noël.'
+                  : `${selectedDisplayName} n'a pas encore ajouté de cadeau.`}
+              </p>
+
+              {canManageSelectedList && (
+                <button className="primary" onClick={openNewGift}>
+                  <Plus size={17}/> Ajouter mon premier cadeau
+                </button>
+              )}
+            </div>
+          )}
+
+          {!loadingList && gifts.length > 0 && (
             <div className="gift-grid">
               {gifts.map(item => (
                 <article className="gift-card" key={item.id}>
                   <div className="gift-card-top">
                     <span className="gift-card-icon">🎁</span>
 
-                    <div className="gift-actions">
-                      <button
-                        className="icon-button"
-                        aria-label="Modifier le cadeau"
-                        onClick={() => openEditGift(item)}
-                      >
-                        <Pencil size={16}/>
-                      </button>
+                    {canManageSelectedList && (
+                      <div className="gift-actions">
+                        <button
+                          className="icon-button"
+                          aria-label="Modifier le cadeau"
+                          onClick={() => openEditGift(item)}
+                        >
+                          <Pencil size={16}/>
+                        </button>
 
-                      <button
-                        className="icon-button delete"
-                        aria-label="Supprimer le cadeau"
-                        onClick={() => void deleteGift(item)}
-                      >
-                        <Trash2 size={16}/>
-                      </button>
-                    </div>
+                        <button
+                          className="icon-button delete"
+                          aria-label="Supprimer le cadeau"
+                          onClick={() => void deleteGift(item)}
+                        >
+                          <Trash2 size={16}/>
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {giftPhotos[item.id]?.length > 0 && (
