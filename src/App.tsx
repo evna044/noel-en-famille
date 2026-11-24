@@ -4,6 +4,7 @@ import type { FormEvent } from 'react'
 import {
   ArrowRight, Gift, LogOut, Plus, Save, Snowflake,
   Trash2, TreePine, Pencil, X, UserRound,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { supabase, supabaseReady } from './supabase'
 import type { Session } from '@supabase/supabase-js'
@@ -39,6 +40,11 @@ type GiftPhoto = {
   sort_order: number
   url: string
 }
+
+type PhotoViewer = {
+  giftId: string
+  photoIndex: number
+} | null
 
 const YEAR = 2026
 const target = new Date('2026-12-24T20:00:00+01:00')
@@ -89,6 +95,7 @@ export default function App() {
 
   const [selectedPhotos, setSelectedPhotos] = useState<File[]>([])
   const [giftPhotos, setGiftPhotos] = useState<Record<string, GiftPhoto[]>>({})
+  const [photoViewer, setPhotoViewer] = useState<PhotoViewer>(null)
 
   useEffect(() => {
     const timer = window.setInterval(
@@ -126,8 +133,54 @@ export default function App() {
       setWishlist(null)
       setGifts([])
       setGiftPhotos({})
+      setPhotoViewer(null)
     }
   }, [session?.user.id])
+
+  useEffect(() => {
+    if (!photoViewer) return
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setPhotoViewer(null)
+      }
+
+      if (event.key === 'ArrowLeft') {
+        setPhotoViewer(current => {
+          if (!current) return null
+
+          const photos = giftPhotos[current.giftId] || []
+          if (photos.length === 0) return null
+
+          return {
+            ...current,
+            photoIndex:
+              (current.photoIndex - 1 + photos.length) % photos.length,
+          }
+        })
+      }
+
+      if (event.key === 'ArrowRight') {
+        setPhotoViewer(current => {
+          if (!current) return null
+
+          const photos = giftPhotos[current.giftId] || []
+          if (photos.length === 0) return null
+
+          return {
+            ...current,
+            photoIndex: (current.photoIndex + 1) % photos.length,
+          }
+        })
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [photoViewer, giftPhotos])
 
   const countdownItems = useMemo(() => [
     ['Jours', countdown.days],
@@ -310,6 +363,39 @@ export default function App() {
     setFormOpen(true)
   }
 
+  function openPhotoViewer(giftId: string, photoIndex: number) {
+    setPhotoViewer({ giftId, photoIndex })
+  }
+
+  function showPreviousPhoto() {
+    setPhotoViewer(current => {
+      if (!current) return null
+
+      const photos = giftPhotos[current.giftId] || []
+      if (photos.length === 0) return null
+
+      return {
+        ...current,
+        photoIndex:
+          (current.photoIndex - 1 + photos.length) % photos.length,
+      }
+    })
+  }
+
+  function showNextPhoto() {
+    setPhotoViewer(current => {
+      if (!current) return null
+
+      const photos = giftPhotos[current.giftId] || []
+      if (photos.length === 0) return null
+
+      return {
+        ...current,
+        photoIndex: (current.photoIndex + 1) % photos.length,
+      }
+    })
+  }
+
   async function saveGift(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
@@ -420,7 +506,6 @@ export default function App() {
     }
   }
 
-  // Suppression d'une seule photo
   async function deletePhoto(photo: GiftPhoto) {
     if (!supabase) return
 
@@ -494,6 +579,10 @@ export default function App() {
       delete updated[item.id]
       return updated
     })
+
+    setPhotoViewer(current =>
+      current?.giftId === item.id ? null : current
+    )
   }
 
   const displayName =
@@ -504,6 +593,19 @@ export default function App() {
   const avatar = profile?.avatar_key
     ? (avatarEmoji[profile.avatar_key] || '🎄')
     : '🎄'
+
+  const viewerPhotos = photoViewer
+    ? giftPhotos[photoViewer.giftId] || []
+    : []
+
+  const currentViewerPhoto =
+    photoViewer && viewerPhotos.length > 0
+      ? viewerPhotos[photoViewer.photoIndex]
+      : null
+
+  const currentViewerGift = photoViewer
+    ? gifts.find(gift => gift.id === photoViewer.giftId)
+    : null
 
   return (
     <main>
@@ -704,13 +806,21 @@ export default function App() {
 
                   {giftPhotos[item.id]?.length > 0 && (
                     <div className="gift-photos">
-                      {giftPhotos[item.id].map(photo => (
-                        <img
+                      {giftPhotos[item.id].map((photo, index) => (
+                        <button
                           key={photo.id}
-                          src={photo.url}
-                          alt={`Photo du cadeau ${item.title}`}
-                          loading="lazy"
-                        />
+                          type="button"
+                          className="gift-photo-button"
+                          onClick={() => openPhotoViewer(item.id, index)}
+                          aria-label={`Afficher la photo ${index + 1} en grand`}
+                        >
+                          <img
+                            src={photo.url}
+                            alt={`Photo du cadeau ${item.title}`}
+                            loading="lazy"
+                          />
+                          <span className="photo-zoom-hint">Agrandir</span>
+                        </button>
                       ))}
                     </div>
                   )}
@@ -905,6 +1015,76 @@ export default function App() {
                 </button>
               </div>
             </form>
+          </section>
+        </div>
+      )}
+
+      {currentViewerPhoto && photoViewer && (
+        <div
+          className="photo-viewer-backdrop"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) {
+              setPhotoViewer(null)
+            }
+          }}
+        >
+          <section
+            className="photo-viewer"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Photo agrandie"
+          >
+            <button
+              type="button"
+              className="photo-viewer-close"
+              onClick={() => setPhotoViewer(null)}
+              aria-label="Fermer la photo"
+            >
+              <X size={24}/>
+            </button>
+
+            {viewerPhotos.length > 1 && (
+              <button
+                type="button"
+                className="photo-viewer-arrow photo-viewer-previous"
+                onClick={showPreviousPhoto}
+                aria-label="Photo précédente"
+              >
+                <ChevronLeft size={30}/>
+              </button>
+            )}
+
+            <div className="photo-viewer-content">
+              <img
+                src={currentViewerPhoto.url}
+                alt={
+                  currentViewerGift
+                    ? `Photo agrandie du cadeau ${currentViewerGift.title}`
+                    : 'Photo agrandie'
+                }
+              />
+
+              <div className="photo-viewer-caption">
+                <span>{currentViewerGift?.title || 'Photo du cadeau'}</span>
+                {viewerPhotos.length > 1 && (
+                  <span>
+                    {photoViewer.photoIndex + 1} / {viewerPhotos.length}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {viewerPhotos.length > 1 && (
+              <button
+                type="button"
+                className="photo-viewer-arrow photo-viewer-next"
+                onClick={showNextPhoto}
+                aria-label="Photo suivante"
+              >
+                <ChevronRight size={30}/>
+              </button>
+            )}
           </section>
         </div>
       )}
