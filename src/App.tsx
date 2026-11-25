@@ -125,7 +125,7 @@ function getCountdown() {
 export default function App() {
   const [countdown, setCountdown] = useState(getCountdown())
   const [session, setSession] = useState<Session | null>(null)
-
+  
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
@@ -145,6 +145,7 @@ export default function App() {
   const [familyFavorites, setFamilyFavorites] = useState<FamilyFavorite[]>([])
 
   // Catégories
+  const [selectedCategoryFilter, setSelectedCategoryFilter] = useState('all')
   const [categories, setCategories] = useState<GiftCategory[]>([])
   const [selectedCategoryId, setSelectedCategoryId] = useState('')
   const [newCategoryName, setNewCategoryName] = useState('')
@@ -210,9 +211,16 @@ export default function App() {
     ? gifts.find(gift => gift.id === photoViewer.giftId)
     : null
 
-  const displayedGifts = showFavoritesOnly
-    ? gifts.filter(gift => favoriteGiftIds.includes(gift.id))
-    : gifts
+ const displayedGifts = gifts.filter(gift => {
+  const matchesFavorite =
+    !showFavoritesOnly || favoriteGiftIds.includes(gift.id)
+
+  const matchesCategory =
+    selectedCategoryFilter === 'all' ||
+    gift.category_id === selectedCategoryFilter
+
+  return matchesFavorite && matchesCategory
+})
 
   useEffect(() => {
     const timer = window.setInterval(
@@ -392,10 +400,9 @@ export default function App() {
 
       // Charger les catégories appartenant au membre sélectionné
       const { data: categoryData, error: categoryError } = await supabase
-        .from('gift_categories')
-        .select('id, owner_id, name')
-        .eq('owner_id', ownerId)
-        .order('name', { ascending: true })
+          .from('gift_categories')
+          .select('id, owner_id, name')
+          .order('name', { ascending: true })
 
       if (categoryError) throw categoryError
 
@@ -1396,6 +1403,19 @@ export default function App() {
                       <Heart size={15} />
                       Mes coups de cœur
                     </button>
+                    <select
+  value={selectedCategoryFilter}
+  onChange={event => setSelectedCategoryFilter(event.target.value)}
+  aria-label="Filtrer les cadeaux par catégorie"
+>
+  <option value="all">Toutes les catégories</option>
+
+  {categories.map(category => (
+    <option key={category.id} value={category.id}>
+      {category.name}
+    </option>
+  ))}
+</select>
                   </div>
                 )}
 
