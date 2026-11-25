@@ -61,6 +61,10 @@ type Reservation = {
   participant_limit: number
   participants: ReservationParticipant[]
 }
+type FamilyFavorite = {
+  gift_id: string
+  user_id: string
+}
 
 const reservationStyles = `
 .reservation-panel{margin-top:16px;padding:13px;border:1px solid #e8e2d4;border-radius:11px;background:#f7f6ef}
@@ -76,6 +80,16 @@ const reservationStyles = `
 .favorite-button.is-favorite{color:#c94d54;background:#fff0f0;border-color:#f0d0d0}
 .favorite-button:disabled{opacity:.55;cursor:wait}
 .favorite-filters{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}
+.gift-favorite-names{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:5px;
+  margin:7px 0;
+  color:#c94d54;
+  font-size:12px;
+  line-height:1.5;
+}
 `
 
 const YEAR = 2026
@@ -123,6 +137,7 @@ export default function App() {
   const [favoriteGiftIds, setFavoriteGiftIds] = useState<string[]>([])
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
   const [favoriteBusyIds, setFavoriteBusyIds] = useState<string[]>([])
+  const [familyFavorites, setFamilyFavorites] = useState<FamilyFavorite[]>([])
 
   const [editingGift, setEditingGift] = useState<GiftItem | null>(null)
   const [formOpen, setFormOpen] = useState(false)
@@ -228,6 +243,7 @@ export default function App() {
       setPhotoViewer(null)
       setReservations({})
       setFavoriteGiftIds([])
+      setFamilyFavorites([])  
       setShowFavoritesOnly(false)
       setFavoriteBusyIds([])
     }
@@ -371,19 +387,29 @@ export default function App() {
       setGifts(loadedGifts)
 
       // Chargement des favoris du compte connecté
-      if (session?.user.id && loadedGifts.length > 0) {
-        const { data: favoriteData, error: favoriteError } = await supabase
-          .from('gift_favorites')
-          .select('gift_id')
-          .eq('user_id', session.user.id)
-          .in('gift_id', loadedGifts.map(gift => gift.id))
+      // Chargement des coups de cœur de toute la famille
+if (session?.user.id && loadedGifts.length > 0) {
+  const { data: favoriteData, error: favoriteError } = await supabase
+    .from('gift_favorites')
+    .select('gift_id, user_id')
+    .in('gift_id', loadedGifts.map(gift => gift.id))
 
-        if (favoriteError) throw favoriteError
+  if (favoriteError) throw favoriteError
 
-        setFavoriteGiftIds(
-          (favoriteData || []).map(row => row.gift_id)
-        )
-      }
+  const loadedFavorites = (favoriteData || []) as FamilyFavorite[]
+
+  setFamilyFavorites(loadedFavorites)
+
+  // Les cadeaux aimés par l'utilisateur connecté
+  setFavoriteGiftIds(
+    loadedFavorites
+      .filter(favorite => favorite.user_id === session.user.id)
+      .map(favorite => favorite.gift_id)
+  )
+} else {
+  setFamilyFavorites([])
+  setFavoriteGiftIds([])
+}
 
       if (loadedGifts.length === 0) {
         setGiftPhotos({})
@@ -482,52 +508,77 @@ export default function App() {
   }
 
   // Ajouter ou retirer un coup de cœur
-  async function toggleFavorite(item: GiftItem) {
-    if (!supabase || !session?.user.id) return
+    async function toggleFavorite(item: GiftItem) {
+  if (!supabase || !session?.user.id) return
 
-    const isFavorite = favoriteGiftIds.includes(item.id)
+  const userId = session.user.id
+  const isFavorite = familyFavorites.some(
+    favorite =>
+      favorite.gift_id === item.id &&
+      favorite.user_id === userId
+  )
 
-    setFavoriteBusyIds(current => [...current, item.id])
-    setMessage('')
+  setFavoriteBusyIds(current =>
+    current.includes(item.id) ? current : [...current, item.id]
+  )
+  setMessage('')
 
-    try {
-      if (isFavorite) {
-        const { error } = await supabase
-          .from('gift_favorites')
-          .delete()
-          .eq('user_id', session.user.id)
-          .eq('gift_id', item.id)
+  try {
+    if (isFavorite) {
+      const { error } = await supabase
+        .from('gift_favorites')
+        .delete()
+        .eq('user_id', userId)
+        .eq('gift_id', item.id)
 
-        if (error) throw error
+      if (error) throw error
 
-        setFavoriteGiftIds(current =>
-          current.filter(id => id !== item.id)
+      setFamilyFavorites(current =>
+        current.filter(
+          favorite =>
+            !(
+              favorite.gift_id === item.id &&
+              favorite.user_id === userId
+            )
         )
-      } else {
-        const { error } = await supabase
-          .from('gift_favorites')
-          .insert({
-            user_id: session.user.id,
-            gift_id: item.id,
-          })
-
-        if (error) throw error
-
-        setFavoriteGiftIds(current =>
-          current.includes(item.id) ? current : [...current, item.id]
-        )
-      }
-    } catch (error) {
-      console.error('Erreur de mise à jour du favori :', error)
-      setMessage(
-        "Impossible de modifier ce favori. Vérifie les autorisations Supabase."
       )
-    } finally {
-      setFavoriteBusyIds(current =>
+
+      setFavoriteGiftIds(current =>
         current.filter(id => id !== item.id)
       )
+    } else {
+      const { error } = await supabase
+        .from('gift_favorites')
+        .insert({
+          user_id: userId,
+          gift_id: item.id,
+        })
+
+      if (error) throw error
+
+      setFamilyFavorites(current => [
+        ...current,
+        {
+          gift_id: item.id,
+          user_id: userId,
+        },
+      ])
+
+      setFavoriteGiftIds(current =>
+        current.includes(item.id) ? current : [...current, item.id]
+      )
     }
+  } catch (error) {
+    console.error('Erreur de mise à jour du favori :', error)
+    setMessage(
+      "Impossible de modifier ce favori. Vérifie les autorisations Supabase."
+    )
+  } finally {
+    setFavoriteBusyIds(current =>
+      current.filter(id => id !== item.id)
+    )
   }
+}
 
   function openReservation(item: GiftItem) {
     setReservationError('')
@@ -953,6 +1004,9 @@ export default function App() {
     setFavoriteGiftIds(current =>
       current.filter(id => id !== item.id)
     )
+    setFamilyFavorites(current =>
+  current.filter(favorite => favorite.gift_id !== item.id)
+)
 
     setGiftPhotos(current => {
       const updated = { ...current }
@@ -1239,6 +1293,17 @@ export default function App() {
                 <div className="gift-grid">
                   {displayedGifts.map(item => {
                     const isFavorite = favoriteGiftIds.includes(item.id)
+                  const giftFavorites = familyFavorites.filter(
+  favorite => favorite.gift_id === item.id
+)
+
+const favoriteNames = giftFavorites.map(favorite => {
+  const member = familyProfiles.find(
+    person => person.id === favorite.user_id
+  )
+
+  return member?.display_name || member?.username || 'Membre'
+})
 
                     return (
                       <article className="gift-card" key={item.id}>
@@ -1308,7 +1373,12 @@ export default function App() {
                         )}
 
                         <h3>{item.title}</h3>
-
+                        {favoriteNames.length > 0 && (
+  <p className="gift-favorite-names">
+    <Heart size={14} fill="currentColor" />
+    {favoriteNames.join(', ')}
+  </p>
+)}
                         {item.price != null && (
                           <p className="gift-price">
                             {item.price.toLocaleString('fr-FR', {
