@@ -1103,3 +1103,13 @@ footer span {
     font-size: 11px;
   }
 }
+.favorite-filters select {
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 1px solid #e8e2d4;
+  border-radius: 20px;
+  background: #fffefa;
+  color: #45664f;
+  font: inherit;
+  cursor: pointer;
+}
