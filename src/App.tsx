@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   ArrowRight, Gift, LogOut, Plus, Save, Snowflake,
-  Trash2, TreePine, Pencil, X, UserRound,
+  Trash2, TreePine, Pencil, X,
   ChevronLeft, ChevronRight, Users, Heart,
 } from 'lucide-react'
 import { supabase, supabaseReady } from './supabase'
