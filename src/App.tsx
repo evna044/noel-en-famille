@@ -4,7 +4,7 @@ import type { FormEvent } from 'react'
 import {
   ArrowRight, Gift, LogOut, Plus, Save, Snowflake,
   Trash2, TreePine, Pencil, X,
-  ChevronLeft, ChevronRight, Users, Heart,
+  ChevronLeft, ChevronRight, Users, Heart, Bell,
 } from 'lucide-react'
 import { supabase, supabaseReady } from './supabase'
 import type { Session } from '@supabase/supabase-js'
@@ -74,6 +74,15 @@ type Reservation = {
 type FamilyFavorite = {
   gift_id: string
   user_id: string
+}
+
+type FamilyNotification = {
+  id: string
+  type: string
+  title: string
+  body: string
+  created_at: string
+  read_at: string | null
 }
 
 const reservationStyles = `
@@ -172,6 +181,11 @@ export default function App() {
   const [reservationBusy, setReservationBusy] = useState(false)
   const [reservationError, setReservationError] = useState('')
 
+  // Notifications familiales
+  const [notifications, setNotifications] = useState<FamilyNotification[]>([])
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const unreadNotifications = notifications.filter(item => !item.read_at).length
+
   const isAdmin = profile?.role === 'admin'
 
   const selectedProfile =
@@ -260,6 +274,38 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (!supabase || !session?.user.id) {
+      setNotifications([])
+      return
+    }
+
+    void loadNotifications()
+
+    const channel = supabase
+      .channel(`family-notifications-${session.user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'notifications',
+          filter: `user_id=eq.${session.user.id}`,
+        },
+        payload => {
+          setNotifications(current => [
+            payload.new as FamilyNotification,
+            ...current,
+          ])
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [session?.user.id])
+
+  useEffect(() => {
     if (session?.user.id) {
       void loadFamily(session.user.id)
     } else {
@@ -318,6 +364,59 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [photoViewer, giftPhotos])
+
+  async function loadNotifications() {
+    if (!supabase || !session?.user.id) return
+
+    const { data, error } = await supabase
+      .from('notifications')
+      .select('id, type, title, body, created_at, read_at')
+      .order('created_at', { ascending: false })
+      .limit(30)
+
+    if (error) {
+      console.error('Erreur de chargement des notifications :', error)
+      return
+    }
+
+    setNotifications((data || []) as FamilyNotification[])
+  }
+
+  async function markNotificationRead(notification: FamilyNotification) {
+    if (!supabase || notification.read_at) return
+
+    const readAt = new Date().toISOString()
+    const { error } = await supabase
+      .from('notifications')
+      .update({ read_at: readAt })
+      .eq('id', notification.id)
+
+    if (error) {
+      console.error('Erreur de lecture notification :', error)
+      return
+    }
+
+    setNotifications(current => current.map(item =>
+      item.id === notification.id ? { ...item, read_at: readAt } : item
+    ))
+  }
+
+  async function markAllNotificationsRead() {
+    if (!supabase || !session?.user.id || unreadNotifications === 0) return
+
+    const readAt = new Date().toISOString()
+    const { error } = await supabase
+      .from('notifications')
+      .update({ read_at: readAt })
+      .is('read_at', null)
+
+    if (error) {
+      console.error('Erreur de lecture des notifications :', error)
+      return
+    }
+
+    setNotifications(current => current.map(item => ({ ...item, read_at: item.read_at || readAt })))
+  }
 
   async function loadFamily(userId: string) {
     if (!supabase) return
@@ -1125,6 +1224,29 @@ export default function App() {
       setSelectedPhotos([])
       setMessage('Cadeau enregistré !')
 
+      // La notification collective est facultative et réservée à sa propre liste.
+      const shouldNotifyFamily = Boolean(
+        !editingGift &&
+        profile &&
+        selectedProfile &&
+        !selectedProfile.is_pseudo &&
+        selectedProfile.id === profile.id &&
+        window.confirm('Cadeau ajouté ! Veux-tu prévenir toute la famille (sauf toi) ?')
+      )
+
+      if (shouldNotifyFamily && giftId) {
+        const { error: notificationError } = await supabase.rpc(
+          'notify_family_new_gift',
+          { p_gift_id: giftId }
+        )
+        if (notificationError) {
+          console.error('Erreur notification nouveau cadeau :', notificationError)
+          setMessage('Cadeau enregistré, mais la notification familiale n’a pas pu être envoyée.')
+        } else {
+          setMessage('Cadeau enregistré et famille prévenue !')
+        }
+      }
+
       await loadMemberList(selectedProfile || profile!)
     } catch (error) {
       console.error('Erreur sauvegarde cadeau :', error)
@@ -1240,14 +1362,56 @@ export default function App() {
         </div>
 
         {session && (
-          <button
-            className="logout-button"
-            onClick={signOut}
-            type="button"
-          >
-            <LogOut size={17} />
-            Déconnexion
-          </button>
+          <div className="header-actions">
+            <div className="notifications-wrap">
+              <button
+                className="notification-bell"
+                type="button"
+                onClick={() => setNotificationsOpen(open => !open)}
+                aria-label={`Notifications${unreadNotifications ? `, ${unreadNotifications} non lues` : ''}`}
+                aria-expanded={notificationsOpen}
+              >
+                <Bell size={18} />
+                {unreadNotifications > 0 && <span className="notification-count">{unreadNotifications > 99 ? '99+' : unreadNotifications}</span>}
+              </button>
+              {notificationsOpen && (
+                <div className="notifications-panel">
+                  <div className="notifications-heading">
+                    <strong>Notifications</strong>
+                    {unreadNotifications > 0 && (
+                      <button type="button" onClick={markAllNotificationsRead}>Tout lire</button>
+                    )}
+                  </div>
+                  {notifications.length === 0 ? (
+                    <p className="notifications-empty">Aucune notification pour le moment.</p>
+                  ) : (
+                    <div className="notifications-list">
+                      {notifications.map(notification => (
+                        <button
+                          type="button"
+                          key={notification.id}
+                          className={`notification-item${notification.read_at ? '' : ' unread'}`}
+                          onClick={() => void markNotificationRead(notification)}
+                        >
+                          <span className="notification-item-icon">{notification.type === 'weekly_reminder' ? '🎄' : notification.type === 'reservation_participation' ? '🤝' : '🎁'}</span>
+                          <span className="notification-item-content">
+                            <strong>{notification.title}</strong>
+                            <span>{notification.body}</span>
+                            <small>{new Date(notification.created_at).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}</small>
+                          </span>
+                          {!notification.read_at && <span className="notification-unread-dot" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <button className="logout-button" onClick={signOut} type="button">
+              <LogOut size={17} />
+              Déconnexion
+            </button>
+          </div>
         )}
       </header>
 
