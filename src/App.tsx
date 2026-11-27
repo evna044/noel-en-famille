@@ -273,15 +273,18 @@ export default function App() {
     return () => data.subscription.unsubscribe()
   }, [])
 
+  
   useEffect(() => {
     if (!supabase || !session?.user.id) {
       setNotifications([])
       return
     }
 
+    const client = supabase
+
     void loadNotifications()
 
-    const channel = supabase
+    const channel = client
       .channel(`family-notifications-${session.user.id}`)
       .on(
         'postgres_changes',
@@ -301,9 +304,10 @@ export default function App() {
       .subscribe()
 
     return () => {
-      void supabase.removeChannel(channel)
+      void client.removeChannel(channel)
     }
   }, [session?.user.id])
+, [session?.user.id])
 
   useEffect(() => {
     if (session?.user.id) {
