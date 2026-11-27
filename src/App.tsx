@@ -307,7 +307,6 @@ export default function App() {
       void client.removeChannel(channel)
     }
   }, [session?.user.id])
-, [session?.user.id])
 
   useEffect(() => {
     if (session?.user.id) {
