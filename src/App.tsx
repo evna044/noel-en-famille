@@ -15,11 +15,13 @@ type Profile = {
   display_name: string
   avatar_key: string
   role: string
+  is_pseudo?: boolean
 }
 
 type Wishlist = {
   id: string
-  owner_id: string
+  owner_id: string | null
+  pseudo_member_id?: string | null
   year: number
   archived: boolean
 }
@@ -176,8 +178,15 @@ export default function App() {
     familyProfiles.find(member => member.id === selectedMemberId) || profile
 
   const canManageSelectedList =
-    Boolean(profile && selectedProfile) &&
-    (isAdmin || selectedMemberId === profile?.id)
+    Boolean(
+      profile &&
+      selectedProfile &&
+      (
+        selectedProfile.is_pseudo ||
+        isAdmin ||
+        selectedMemberId === profile.id
+      )
+    )
 
   const displayName =
     profile?.display_name || profile?.username || 'Membre de la famille'
@@ -336,11 +345,28 @@ export default function App() {
 
       if (membersError) throw membersError
 
-      const members = (membersData || []) as Profile[]
+      const realMembers = (membersData || []) as Profile[]
+      const { data: pseudoData, error: pseudoError } = await supabase
+        .from('pseudo_members')
+        .select('id, display_name, avatar_key')
+        .order('display_name', { ascending: true })
+
+      if (pseudoError) throw pseudoError
+
+      const pseudoMembers = (pseudoData || []).map(member => ({
+        id: member.id,
+        username: '',
+        display_name: member.display_name,
+        avatar_key: member.avatar_key || 'tree',
+        role: 'pseudo',
+        is_pseudo: true,
+      })) as Profile[]
+
+      const members = [...realMembers, ...pseudoMembers]
       setFamilyProfiles(members)
 
       setSelectedMemberId(userId)
-      await loadMemberList(userId, true)
+      await loadMemberList(realMembers.find(member => member.id === userId)!, true)
     } catch (error) {
       console.error('Erreur de chargement de la famille :', error)
       setMessage(
@@ -351,8 +377,11 @@ export default function App() {
     }
   }
 
-  async function loadMemberList(ownerId: string, createIfMissing = false) {
+  async function loadMemberList(member: Profile, createIfMissing = false) {
     if (!supabase) return
+
+    const ownerId = member.id
+    const isPseudo = Boolean(member.is_pseudo)
 
     setLoadingList(true)
     setMessage('')
@@ -366,12 +395,17 @@ export default function App() {
     setCategories([])
 
     try {
-      let { data: wishlistData, error: wishlistError } = await supabase
+      let wishlistQuery = supabase
         .from('wishlist_years')
-        .select('id, owner_id, year, archived')
-        .eq('owner_id', ownerId)
+        .select('id, owner_id, pseudo_member_id, year, archived')
         .eq('year', YEAR)
-        .maybeSingle()
+
+      wishlistQuery = isPseudo
+        ? wishlistQuery.eq('pseudo_member_id', ownerId)
+        : wishlistQuery.eq('owner_id', ownerId)
+
+      let { data: wishlistData, error: wishlistError } =
+        await wishlistQuery.maybeSingle()
 
       if (wishlistError) throw wishlistError
 
@@ -379,11 +413,12 @@ export default function App() {
         const { data: createdWishlist, error: createError } = await supabase
           .from('wishlist_years')
           .insert({
-            owner_id: ownerId,
+            owner_id: isPseudo ? null : ownerId,
+            pseudo_member_id: isPseudo ? ownerId : null,
             year: YEAR,
             archived: false,
           })
-          .select('id, owner_id, year, archived')
+          .select('id, owner_id, pseudo_member_id, year, archived')
           .single()
 
         if (createError) throw createError
@@ -538,8 +573,8 @@ export default function App() {
     setSelectedMemberId(member.id)
     setShowFavoritesOnly(false)
     await loadMemberList(
-      member.id,
-      member.id === profile?.id
+      member,
+      Boolean(member.is_pseudo || member.id === profile?.id)
     )
   }
 
@@ -638,7 +673,7 @@ export default function App() {
       const { data, error } = await supabase
         .from('gift_categories')
         .insert({
-          owner_id: selectedMemberId,
+          owner_id: selectedProfile?.is_pseudo ? session.user.id : selectedMemberId,
           name,
         })
         .select('id, owner_id, name')
@@ -759,7 +794,7 @@ export default function App() {
       }
 
       setReservationGift(null)
-      await loadMemberList(selectedMemberId)
+      await loadMemberList(selectedProfile || profile!)
       setMessage('Réservation créée !')
     } catch (error) {
       console.error('Erreur réservation :', error)
@@ -821,7 +856,7 @@ export default function App() {
 
       if (error) throw error
 
-      await loadMemberList(selectedMemberId)
+      await loadMemberList(selectedProfile || profile!)
       setMessage('Tu participes maintenant à ce cadeau !')
     } catch (error) {
       console.error('Erreur participation :', error)
@@ -875,7 +910,7 @@ export default function App() {
         if (error) throw error
       }
 
-      await loadMemberList(selectedMemberId)
+      await loadMemberList(selectedProfile || profile!)
       setMessage('Réservation mise à jour.')
     } catch (error) {
       console.error('Erreur réservation :', error)
@@ -1090,7 +1125,7 @@ export default function App() {
       setSelectedPhotos([])
       setMessage('Cadeau enregistré !')
 
-      await loadMemberList(selectedMemberId)
+      await loadMemberList(selectedProfile || profile!)
     } catch (error) {
       console.error('Erreur sauvegarde cadeau :', error)
 
@@ -1340,6 +1375,9 @@ export default function App() {
                   </span>
                   <span>
                     {member.display_name || member.username}
+                    {member.is_pseudo && (
+                      <small className="pseudo-member-label">Sans compte</small>
+                    )}
                   </span>
                 </button>
               ))}
